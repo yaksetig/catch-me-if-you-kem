@@ -1,0 +1,16 @@
+# Summary of changes for run 2f509440-3c1d-42e3-8cad-29c1480727fd
+Built a Lean 4 + Mathlib formalization of the KEM-based channel-establishment protocol (Bob → Alice via a public registry and bulletin board) and proved its correctness, provenance, binding, and privacy-shape properties under clean abstract cryptographic interfaces. The project compiles with no `sorry`, no `admit`, and no new global `axiom` (checked axiom footprint is just `propext`).
+
+Module layout (all under `ChannelEstablishment/`, aggregated by `ChannelEstablishment.lean`, wired into `lakefile.toml` as a library):
+- `Types.lean` — abstract carrier types bundled in a `ProtocolTypes` typeclass, plus the protocol data objects `ChannelAttempt` / `PublishedMessage` / `EstablishedChannel` (the published message and established channel carry no sender field).
+- `CryptoInterfaces.lean` — `KEM` (with `correctness`), a randomized `KEMRandomized` variant reduced to `KEM` via `ofRandomized`, `HKDF`, and `AEAD` (with `correctness` and `ad_binding`). No primitive is proved secure from first principles; each assumption is an explicit structure field.
+- `Registry.lean` — `Registry` with its lookup invariant and a `KeyEnvironment` linking key ownership to registered keys (`owns_key_lookup`).
+- `Protocol.lean` — `sendChannel`, `publish`, `receiveChannel`, and the `Activation` interface.
+- `Security.lean` — the positive theorems.
+- `Limitations.lean` — the negative results and recipient-privacy caveat.
+
+Theorems proved (all required names present): `channel_correctness`, `send_uses_registered_recipient_key`, `published_message_matches_attempt`, `send_uses_full_privacy_array`, `full_privacy_activates_recipient`, `established_ciphertext_bound_to_c1`, `receive_success_implies_decap_success`, `sender_recipient_agree_on_secret_and_payload`, `closed_world_alice_established_from_bob_attempt`, `sender_identity_not_encoded_in_published_message`, `same_publication_different_sender_possible`, `full_array_leaks_no_slot_information` — plus supporting results (`established_decrypt_uses_c1_as_ad`, `aead_ad_binding_channel`, `full_privacy_activates_all`, `full_privacy_array_recipient_independent`), the limitation `published_message_does_not_authenticate_sender`, and the privacy-dependency results `transcript_recipient_privacy_from_key_private_kem` (from `KEMKeyPrivate` + `AEADPrivacy` over an abstract `IndistinguishabilityModel`, via a two-hop hybrid) and `recipient_privacy_requires_kem_key_privacy`.
+
+Per the caveat, the false "if Alice establishes a channel then Bob created it" is deliberately NOT proved: `published_message_does_not_authenticate_sender` and `same_publication_different_sender_possible` show the published message carries no sender identity; a Bob-origin conclusion holds only in the explicitly-marked closed-world theorem. The formalization also distinguishes registry-lookup privacy from cryptographic recipient anonymity: the activation-array leakage result concerns only the array, while transcript recipient privacy is shown to require a key-private/recipient-anonymous KEM.
+
+A detailed write-up (assumptions, theorem list, and what cannot be proved) is in `CHANNEL_ESTABLISHMENT_SUMMARY.md`. All work is committed and pushed.
