@@ -1,2 +1,2 @@
-# catch-me-if-you-kem
+# Catch me if you KEM
 Post-quantum private message tagging protocol
