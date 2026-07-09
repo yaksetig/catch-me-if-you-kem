@@ -1,0 +1,470 @@
+theory pq_channel_establishment
+begin
+
+builtins: hashing, asymmetric-encryption
+
+functions:
+  hkdf/2,
+  aead_enc/3
+
+
+/*************************************************************/
+/* Abstraction boundary                                      */
+/*************************************************************/
+/*
+  This model focuses only on channel establishment.
+
+  We model:
+
+    ML-KEM.Encapsulate(pk_A)
+
+  symbolically as:
+
+    ss fresh
+    c1 = aenc(ss, pk_A)
+
+  and Alice's successful decapsulation by matching:
+
+    c1 = aenc(ss, pk(view_sk_A))
+
+  This is not claiming ML-KEM is public-key encryption. It is only the
+  symbolic abstraction of an encapsulation ciphertext that lets the holder
+  of view_sk_A recover ss.
+
+  The AEAD ciphertext is modeled as:
+
+    c2 = aead_enc(payload, hkdf(ss, context), c1)
+
+  where c1 is used as associated data.
+
+  The full-privacy activation array [1,1,...,1] is represented by a symbolic
+  public system value full_array.
+*/
+
+
+/*************************************************************/
+/* Setup                                                     */
+/*************************************************************/
+
+rule Setup:
+  [ Fr(~context), Fr(~full_array) ]
+  --[ SetupDone(),
+      ContextCreated(~context),
+      FullPrivacyArrayCreated(~full_array) ]->
+  [ !Context(~context),
+    !FullPrivacyArray(~full_array),
+    CanRegisterAlice(),
+    CanRegisterBob() ]
+
+
+restriction setup_once:
+  "All #i #j.
+     SetupDone() @ i
+     & SetupDone() @ j
+     ==> #i = #j"
+
+
+/*************************************************************/
+/* Registration table                                        */
+/*************************************************************/
+/*
+  The public registry contains pairs:
+
+      (id_u, pk_u)
+
+  We expose registrations on the network with Out(...), reflecting that
+  users can download the full table locally. Bob does not query Alice
+  specifically on-chain.
+*/
+
+rule RegisterAlice:
+  [ CanRegisterAlice(),
+    Fr(~view_sk_A)
+  ]
+  --[ UserRegistered('Alice', pk(~view_sk_A)) ]->
+  [ !UserKeys('Alice', ~view_sk_A),
+    !Registered('Alice', pk(~view_sk_A)),
+    Out(<'Alice', pk(~view_sk_A)>) ]
+
+
+rule RegisterBob:
+  [ CanRegisterBob(),
+    Fr(~view_sk_B)
+  ]
+  --[ UserRegistered('Bob', pk(~view_sk_B)) ]->
+  [ !UserKeys('Bob', ~view_sk_B),
+    !Registered('Bob', pk(~view_sk_B)),
+    Out(<'Bob', pk(~view_sk_B)>) ]
+
+
+/*************************************************************/
+/* Bob establishes a private channel with Alice              */
+/*************************************************************/
+/*
+  Bob performs:
+
+    1. Download registry table.
+    2. Locally lookup Alice's public key pk_A.
+    3. Encapsulate:
+
+          ss_ab, c1 <- ML-KEM.Encapsulate(pk_A)
+
+       Symbolically:
+
+          ss_ab fresh
+          c1 = aenc(ss_ab, pk_A)
+
+    4. Derive:
+
+          k = HKDF(ss_ab, context)
+
+    5. Encrypt private setup payload:
+
+          c2 = AEAD.Encrypt(k, payload, c1)
+
+    6. Publish:
+
+          <c1, c2, full_privacy_array>
+*/
+
+rule BobEstablishesChannelWithAlice:
+  [ !UserKeys('Bob', view_sk_B),
+    !Registered('Bob', pk(view_sk_B)),
+    !Registered('Alice', pk_A),
+    !Context(context),
+    !FullPrivacyArray(full_array),
+    Fr(~ss_ab),
+    Fr(~payload),
+    Fr(~channel_id)
+  ]
+  --[ RegistryDownloaded('Bob'),
+      RegistryLookupLocal('Bob', 'Alice', pk_A),
+
+      ChannelAttempt(
+        ~channel_id,
+        'Bob',
+        'Alice',
+        pk_A,
+        ~ss_ab,
+        ~payload,
+        aenc(~ss_ab, pk_A),
+        aead_enc(
+          ~payload,
+          hkdf(~ss_ab, context),
+          aenc(~ss_ab, pk_A)
+        ),
+        full_array
+      ),
+
+      ChannelPublished(
+        ~channel_id,
+        'Bob',
+        'Alice',
+        pk_A,
+        ~ss_ab,
+        ~payload,
+        aenc(~ss_ab, pk_A),
+        aead_enc(
+          ~payload,
+          hkdf(~ss_ab, context),
+          aenc(~ss_ab, pk_A)
+        ),
+        full_array
+      ) ]->
+  [ Out(<
+      aenc(~ss_ab, pk_A),
+      aead_enc(
+        ~payload,
+        hkdf(~ss_ab, context),
+        aenc(~ss_ab, pk_A)
+      ),
+      full_array
+    >),
+
+    !BoardMessage(
+      aenc(~ss_ab, pk_A),
+      aead_enc(
+        ~payload,
+        hkdf(~ss_ab, context),
+        aenc(~ss_ab, pk_A)
+      ),
+      full_array
+    ),
+
+    !SenderChannel(
+      'Bob',
+      'Alice',
+      ~ss_ab,
+      ~payload,
+      aenc(~ss_ab, pk_A),
+      aead_enc(
+        ~payload,
+        hkdf(~ss_ab, context),
+        aenc(~ss_ab, pk_A)
+      )
+    )
+  ]
+
+
+/*************************************************************/
+/* Alice scans and receives                                  */
+/*************************************************************/
+/*
+  Alice scans the board for ciphertexts whose activation array includes
+  her slot. In full-privacy mode, every slot is activated, so every recipient
+  tries to decapsulate/decrypt.
+
+  Successful receive is modeled by matching:
+
+      c1 = aenc(ss, pk(view_sk_A))
+
+  and:
+
+      c2 = aead_enc(payload, hkdf(ss, context), c1)
+
+  This captures the successful decapsulation + key derivation + AEAD path.
+*/
+
+rule AliceReceivesChannel:
+  [ !BoardMessage(
+      aenc(ss, pk(view_sk_A)),
+      aead_enc(
+        payload,
+        hkdf(ss, context),
+        aenc(ss, pk(view_sk_A))
+      ),
+      full_array
+    ),
+
+    !UserKeys('Alice', view_sk_A),
+    !Registered('Alice', pk(view_sk_A)),
+    !Context(context),
+    !FullPrivacyArray(full_array)
+  ]
+  --[ BoardMessageUsed(
+        aenc(ss, pk(view_sk_A)),
+        aead_enc(
+          payload,
+          hkdf(ss, context),
+          aenc(ss, pk(view_sk_A))
+        ),
+        full_array
+      ),
+
+      SlotActivated('Alice', full_array),
+
+      ChannelDecrypted(
+        'Alice',
+        ss,
+        payload,
+        aenc(ss, pk(view_sk_A)),
+        aead_enc(
+          payload,
+          hkdf(ss, context),
+          aenc(ss, pk(view_sk_A))
+        )
+      ),
+
+      ChannelEstablished(
+        'Alice',
+        ss,
+        payload,
+        aenc(ss, pk(view_sk_A)),
+        aead_enc(
+          payload,
+          hkdf(ss, context),
+          aenc(ss, pk(view_sk_A))
+        ),
+        context
+      ) ]->
+  [ !EstablishedChannel(
+      'Alice',
+      ss,
+      payload,
+      aenc(ss, pk(view_sk_A))
+    )
+  ]
+
+
+/*************************************************************/
+/* Sources lemma                                             */
+/*************************************************************/
+/*
+  This tells Tamarin that every board message used by Alice must have come
+  from a previous publication rule.
+*/
+
+lemma board_message_sources [sources]:
+  "All c1 c2 full_array #i.
+     BoardMessageUsed(c1, c2, full_array) @ i
+     ==> (Ex channel_id sender recipient pk_R ss payload #j.
+           ChannelPublished(
+             channel_id,
+             sender,
+             recipient,
+             pk_R,
+             ss,
+             payload,
+             c1,
+             c2,
+             full_array
+           ) @ j
+           & #j < #i)"
+
+
+/*************************************************************/
+/* Executability                                             */
+/*************************************************************/
+
+lemma executable:
+  exists-trace
+  "Ex ss payload c1 c2 context #i.
+     ChannelEstablished('Alice', ss, payload, c1, c2, context) @ i"
+
+
+/*************************************************************/
+/* Registry provenance                                       */
+/*************************************************************/
+
+lemma alice_public_key_registered:
+  "All pk_A #i.
+     RegistryLookupLocal('Bob', 'Alice', pk_A) @ i
+     ==> (Ex #j.
+           UserRegistered('Alice', pk_A) @ j
+           & #j < #i)"
+
+
+lemma bob_was_registered_before_channel_attempt:
+  "All channel_id pk_A ss payload c1 c2 full_array #i.
+     ChannelAttempt(
+       channel_id,
+       'Bob',
+       'Alice',
+       pk_A,
+       ss,
+       payload,
+       c1,
+       c2,
+       full_array
+     ) @ i
+     ==> (Ex pk_B #j.
+           UserRegistered('Bob', pk_B) @ j
+           & #j < #i)"
+
+
+/*************************************************************/
+/* Publication provenance                                    */
+/*************************************************************/
+
+lemma published_channel_has_attempt:
+  "All channel_id sender recipient pk_R ss payload c1 c2 full_array #i.
+     ChannelPublished(
+       channel_id,
+       sender,
+       recipient,
+       pk_R,
+       ss,
+       payload,
+       c1,
+       c2,
+       full_array
+     ) @ i
+     ==> ChannelAttempt(
+           channel_id,
+           sender,
+           recipient,
+           pk_R,
+           ss,
+           payload,
+           c1,
+           c2,
+           full_array
+         ) @ i"
+
+
+lemma published_uses_full_privacy_array:
+  "All channel_id sender recipient pk_R ss payload c1 c2 full_array #i.
+     ChannelPublished(
+       channel_id,
+       sender,
+       recipient,
+       pk_R,
+       ss,
+       payload,
+       c1,
+       c2,
+       full_array
+     ) @ i
+     ==> (Ex #j.
+           FullPrivacyArrayCreated(full_array) @ j
+           & #j < #i)"
+
+
+/*************************************************************/
+/* Alice receive soundness                                   */
+/*************************************************************/
+
+lemma alice_receives_only_published_messages:
+  "All ss payload c1 c2 context #i.
+     ChannelEstablished('Alice', ss, payload, c1, c2, context) @ i
+     ==> (Ex channel_id sender recipient pk_R full_array #j.
+           ChannelPublished(
+             channel_id,
+             sender,
+             recipient,
+             pk_R,
+             ss,
+             payload,
+             c1,
+             c2,
+             full_array
+           ) @ j
+           & #j < #i)"
+
+
+lemma alice_established_channel_matches_bob_attempt:
+  "All ss payload c1 c2 context #i.
+     ChannelEstablished('Alice', ss, payload, c1, c2, context) @ i
+     ==> (Ex channel_id pk_A full_array #j.
+           ChannelAttempt(
+             channel_id,
+             'Bob',
+             'Alice',
+             pk_A,
+             ss,
+             payload,
+             c1,
+             c2,
+             full_array
+           ) @ j
+           & #j < #i)"
+
+
+lemma alice_ciphertext_is_addressed_to_alice:
+  "All ss payload c1 c2 context #i.
+     ChannelEstablished('Alice', ss, payload, c1, c2, context) @ i
+     ==> (Ex view_sk_A #j.
+           UserRegistered('Alice', pk(view_sk_A)) @ j
+           & c1 = aenc(ss, pk(view_sk_A))
+           & #j < #i)"
+
+
+lemma established_aead_ciphertext_is_bound_to_c1:
+  "All ss payload c1 c2 context #i.
+     ChannelEstablished('Alice', ss, payload, c1, c2, context) @ i
+     ==> c2 = aead_enc(payload, hkdf(ss, context), c1)"
+
+
+/*************************************************************/
+/* Sender/recipient shared-secret agreement                  */
+/*************************************************************/
+
+lemma alice_and_bob_agree_on_shared_secret:
+  "All ss payload c1 c2 context #i.
+     ChannelEstablished('Alice', ss, payload, c1, c2, context) @ i
+     ==> (Ex #j.
+           SenderChannel('Bob', 'Alice', ss, payload, c1, c2) @ j
+           & #j < #i)"
+
+
+end
