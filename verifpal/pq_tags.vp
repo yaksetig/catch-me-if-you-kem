@@ -1,0 +1,55 @@
+// Simple Diffie-Hellman with AEAD
+attacker[active]
+
+principal Blockchain[
+]
+
+principal Alice[
+	generates id_A
+	generates a
+	pk_A = G^a
+]
+
+// party Bob generates key material
+principal Bob[
+	generates id_B
+	generates b
+	pk_B = G^b
+]
+
+// parties register their (id, pk) pairs
+Alice -> Blockchain: [id_A], [pk_A]
+Bob	  -> Blockchain: [id_B], [pk_B]
+
+// Bob performs a lookup
+Blockchain -> Bob: [id_A], [pk_A]
+
+principal Bob[
+	generates ss
+	
+	k = HASH(ss)
+	c1 = PKE_ENC(pk_A, ss)
+	c2 = AEAD_ENC(k, id_B, c1)
+]
+
+// Bob publishes the ciphertexts on the blockchain
+Bob -> Blockchain  : [c1], [c2]
+
+// Alice fetches the new channel request
+Blockchain -> Alice: [c1], [c2]
+
+principal Alice[
+	ss_ = PKE_DEC(a, c1)
+	k_ = HASH(ss_)
+	id_B_ = AEAD_DEC(k_, c2, c1)?
+]
+
+queries[
+	confidentiality? k
+	confidentiality? ss
+
+	equivalence? k, k_
+	equivalence? ss, ss_
+
+	//authentication? Bob -> Alice: c2
+]
